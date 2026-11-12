@@ -1,15 +1,23 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.config.database import Base
 
 
 class CompactJob(Base):
-    """Celery-backed rewrite job. Progress is a percentage 0-100."""
+    """Celery-backed rewrite job. Progress is a percentage 0-100.
+
+    Admission is partition-scoped (see services/schedule_service.py):
+    ``admission_state`` is ``waiting`` until the scheduler grants a lease on
+    every planned partition, then ``admitted`` and the Celery task is
+    dispatched. ``idempotency_key`` makes duplicate execute submissions
+    resolve to the same job instead of a second run.
+    """
 
     __tablename__ = "compact_jobs"
+    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_compact_job_idempotency"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     plan_id: Mapped[int] = mapped_column(Integer, ForeignKey("compact_plans.id", ondelete="CASCADE"), index=True)
@@ -24,8 +32,14 @@ class CompactJob(Base):
     rows_before: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     rows_after: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     snapshot_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("table_snapshots.id", ondelete="SET NULL"), nullable=True)
+    snapshot_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     celery_task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # admission: waiting (queued behind a partition conflict) | admitted (lease granted)
+    admission_state: Mapped[str] = mapped_column(String(16), nullable=False, default="waiting")
+    waiting_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    admitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     triggered_by: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

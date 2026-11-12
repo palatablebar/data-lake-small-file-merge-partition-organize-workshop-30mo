@@ -389,6 +389,8 @@ def run_seed(db=None) -> dict:
                 bytes_written=metrics["bytes_written"],
                 rows_before=metrics["rows_before"],
                 rows_after=metrics["rows_after"],
+                admission_state="admitted",
+                idempotency_key=f"exec:{plan.id}:{plan.fingerprint}",
                 triggered_by=users["engineer"].id,
             )
             session.add(job)
@@ -403,6 +405,7 @@ def run_seed(db=None) -> dict:
                 job_id=job.id,
             )
             job.snapshot_id = snapshot_v2.id
+            job.snapshot_version = snapshot_v2.version
             plan.status = PlanStatus.COMPLETED.value
             session.commit()
 

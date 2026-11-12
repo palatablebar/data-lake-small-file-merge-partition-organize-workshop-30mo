@@ -37,7 +37,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 - **湖表总览**：3 张湖表的分区健康热力条、小文件数、可回收文件数、平均健康度。
 - **文件与分区明细**：分区文件数/小文件数/平均大小/健康度/HOT 风险；文件明细支持分区、大小档位、排序筛选。
 - **合并计划预览**（算法 1）：选分区 → FFD 装箱 → 分组树、产出文件数、节省率、预计耗时/成本、hot 风险提示、幂等指纹。
-- **任务执行监控**：Celery worker 逐组重写 manifest、回报进度、自动生成快照；同一湖表 Redis 执行锁防并发。
+- **任务执行监控**：按分区租约并发调度（互不重叠且不相邻的分区同时执行，重叠/相邻分区进入等待队列）；每个分区先独立重写并校验行数，全部通过后统一发布一个快照版本；重复投递只生效一次。页面展示分区占用、等待队列与已发布快照版本。
 - **快照 diff 与校验**（算法 2）：两版 manifest 的 added/removed/changed、Σrows 守恒、checksum 一致性。
 - **横切**：JWT + 三角色、审计日志、Redis 滑动窗口限流 + 每日计划配额、统一错误码。
 
@@ -75,6 +75,14 @@ frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,consta
 - 热分区：分区值 = 该表最新分区 → `risk=hot`，计划中降权并提示延后。
 - 指纹 `fingerprint`：对 (strategy, target, threshold, partitions, 每组文件路径) 做 SHA-256；相同输入再次生成 → `idempotent=true`。
 
+### 分区级并发调度与原子发布（`backend/app/services/schedule_service.py`、`app/tasks/compact_job.py`）
+
+- **分区租约**：提交执行后任务先进入 `admission_state=waiting`；调度器在 `lake_tables` 行锁内检查 `partition_leases`（`table_id + partition_value` 唯一），只有与在跑/已准入任务**既不重叠也不相邻**（分区值排序后下标差 = 1 即相邻）的任务才被准入（`admitted`）并投递 Celery；冲突任务留在等待队列并记录 `waiting_reason` 与 `blocked_by`，持锁任务结束后自动重新调度。
+- **重复投递只生效一次**：① 提交侧用条件更新把计划 `draft → executing`，重复提交命中 `idempotency_key` 返回同一个任务；② worker 侧用原子 `queued+admitted → running` 认领，重复投递直接返回，不会二次改写。
+- **分区独立重写 + 行数校验**：worker 逐分区在 `compact_job_partitions.staged_files` 中暂存重写后的分区 manifest，校验 Σrows 守恒（`LAKE-2020` 即中止）；此阶段不改线上 `data_files`。
+- **统一发布快照**：全部分区校验通过后，在**单个事务**内替换这些分区的文件行、重算健康度、追加快照版本并把任务置为成功——要么全部换新，要么全部保持旧文件；发布按 `lake_tables` 行锁串行，快照版本不会撞号，快照 diff 始终行数守恒。
+- **页面**：任务监控页展示每张表的分区占用（租约 → 任务）、等待队列（顺位 + 冲突原因）与最新快照版本；任务详情列出每个分区的重写/校验/发布状态。
+
 ### 算法 2：manifest diff 与守恒校验（`backend/app/compaction/manifest.py`）
 
 - 输入两版 manifest：`path -> {size_bytes, rows, checksum, partition}`。
@@ -104,6 +112,8 @@ band          = healthy(≥75) / watch(≥50) / degraded(<50)
 | 枚举 | 后端 | 前端 |
 | --- | --- | --- |
 | JobStatus `queued/running/succeeded/failed` | `app/constants/job_status.py`、`compact_job.py`、`job_service.py` | `src/constants/jobStatus.ts`、`types/job.ts` |
+| AdmissionState `waiting/admitted` | `app/models/compact_job.py`、`app/services/schedule_service.py` | `src/types/job.ts` |
+| PartitionTaskStatus `pending/rewriting/validated/published/failed` | `app/models/compact_job_partition.py`、`app/tasks/compact_job.py` | `src/types/job.ts` |
 | PlanStatus `draft/executing/completed/failed` | `app/constants/plan_status.py`、`plan_service.py` | `src/constants/planStatus.ts`、`types/plan.ts` |
 | PartitionRisk `normal/hot` | `app/constants/partition_risk.py`、`partition_service.py` | `src/constants/partitionRisk.ts`、`types/table.ts` |
 | HealthBand `healthy/watch/degraded` | `app/constants/health_band.py` | `src/constants/healthBand.ts` |

@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia'
 import { fetchJobs, retryJob } from '../api/job'
-import type { CompactJob } from '../types/job'
+import type { CompactJob, JobSchedule } from '../types/job'
 
 interface JobState {
   items: CompactJob[]
+  schedule: JobSchedule | null
   selectedId: number | null
   loading: boolean
   error: string
@@ -12,6 +13,7 @@ interface JobState {
 export const useJobStore = defineStore('jobs', {
   state: (): JobState => ({
     items: [],
+    schedule: null,
     selectedId: null,
     loading: false,
     error: '',
@@ -28,6 +30,7 @@ export const useJobStore = defineStore('jobs', {
       try {
         const result = await fetchJobs(tableId)
         this.items = result.items
+        this.schedule = result.schedule
         if (this.selectedId === null && result.items.length > 0) {
           this.selectedId = result.items[0].id
         }

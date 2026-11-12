@@ -1,4 +1,6 @@
 """Compaction plan generation, idempotency and execution dispatch."""
+import uuid
+
 from sqlalchemy.orm import Session
 
 from app.compaction.binpack import build_plan
@@ -7,7 +9,7 @@ from app.config.settings import settings
 from app.constants.error_codes import AppError, ErrorCode
 from app.constants.file_format import TableStatus
 from app.constants.plan_status import PlanStatus
-from app.middlewares.quota import acquire_table_lock, consume_plan_quota, quota_snapshot, release_table_lock
+from app.middlewares.quota import consume_plan_quota, quota_snapshot
 from app.models import CompactJob, CompactPlan, DataFile, LakeTable, PartitionSpec, User
 from app.schemas.common import iso
 from app.services import partition_service, table_service
@@ -189,14 +191,46 @@ def list_plans(db: Session, table_id: int | None = None, limit: int = 40) -> lis
 
 
 def execute_plan(db: Session, user: User, plan_id: int) -> dict:
+    """Queue a plan for partition-scheduled execution.
+
+    Idempotent delivery: the draft -> executing transition is a conditional
+    UPDATE, so a duplicate submission (double click, retry, repeated webhook)
+    resolves to the already-created job instead of starting a second run.
+    """
     plan = get_plan_or_404(db, plan_id)
-    if plan.status != PlanStatus.DRAFT.value:
-        raise AppError(ErrorCode.PLAN_ALREADY_EXECUTED, detail={"status": plan.status})
     table = table_service.get_table_or_404(db, plan.table_id)
     if table.status != TableStatus.ACTIVE.value:
         raise AppError(ErrorCode.TABLE_PAUSED)
-    if not acquire_table_lock(table.id):
-        raise AppError(ErrorCode.JOB_LOCKED, detail={"table_id": table.id})
+
+    idempotency_key = f"exec:{plan.id}:{plan.fingerprint}"
+    claimed = (
+        db.query(CompactPlan)
+        .filter(CompactPlan.id == plan.id, CompactPlan.status == PlanStatus.DRAFT.value)
+        .update({CompactPlan.status: PlanStatus.EXECUTING.value}, synchronize_session=False)
+    )
+    if not claimed:
+        db.commit()  # release the transaction; nothing was written
+        existing = (
+            db.query(CompactJob)
+            .filter(CompactJob.idempotency_key == idempotency_key)
+            .order_by(CompactJob.id.desc())
+            .first()
+        )
+        if existing is None:
+            existing = (
+                db.query(CompactJob)
+                .filter(CompactJob.plan_id == plan.id)
+                .order_by(CompactJob.id.desc())
+                .first()
+            )
+        if existing is not None and existing.status in ("queued", "running", "succeeded"):
+            from app.services import job_service
+
+            log_event("JOB_DUPLICATE_SUBMISSION", job_id=existing.id, plan_id=plan.id)
+            data = job_service.serialize_job(db, existing)
+            data["duplicate"] = True
+            return data
+        raise AppError(ErrorCode.PLAN_ALREADY_EXECUTED, detail={"status": plan.status})
 
     job = CompactJob(
         plan_id=plan.id,
@@ -205,44 +239,29 @@ def execute_plan(db: Session, user: User, plan_id: int) -> dict:
         progress=0,
         groups_total=len(plan.groups or []),
         triggered_by=user.id,
+        admission_state="waiting",
+        idempotency_key=idempotency_key,
     )
-    try:
-        db.add(job)
-        plan.status = PlanStatus.EXECUTING.value
-        db.commit()
-        db.refresh(job)
-        from app.tasks.compact_job import run_compaction_job
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    log_event("JOB_QUEUED", job_id=job.id, plan_id=plan.id, partitions=plan.partition_values)
 
-        async_result = run_compaction_job.delay(job.id)
-        job.celery_task_id = async_result.id
-        db.commit()
-    except Exception as exc:  # broker badly down -> fail visibly instead of hanging
-        db.rollback()
-        release_table_lock(table.id)
-        plan.status = PlanStatus.FAILED.value
-        job.status = "failed"
-        job.failure_reason = f"任务投递失败: {type(exc).__name__}"
-        db.add(job)
-        db.commit()
-        log_event("JOB_DISPATCH_FAILED", plan_id=plan.id, reason=str(exc))
-        raise AppError("LAKE-5000", message="合并任务投递失败，请稍后重试", status_code=503) from exc
+    from app.services import job_service, schedule_service
 
-    log_event("JOB_DISPATCHED", job_id=job.id, plan_id=plan.id, task_id=job.celery_task_id)
-    from app.services import job_service
-
+    _try_schedule(db, schedule_service, table.id)
+    db.refresh(job)
     return job_service.serialize_job(db, job)
 
 
 def retry_job(db: Session, user: User, job_id: int) -> dict:
-    from app.services import job_service
+    from app.services import job_service, schedule_service
 
     job = job_service.get_job_or_404(db, job_id)
     if job.status != "failed":
         raise AppError("LAKE-2018", message="只有失败的任务可以重试", status_code=409, detail={"status": job.status})
     plan = get_plan_or_404(db, job.plan_id)
     table = table_service.get_table_or_404(db, plan.table_id)
-    if not acquire_table_lock(table.id):
-        raise AppError(ErrorCode.JOB_LOCKED, detail={"table_id": table.id})
     new_job = CompactJob(
         plan_id=plan.id,
         table_id=table.id,
@@ -250,19 +269,24 @@ def retry_job(db: Session, user: User, job_id: int) -> dict:
         progress=0,
         groups_total=len(plan.groups or []),
         triggered_by=user.id,
+        admission_state="waiting",
+        idempotency_key=f"retry:{job.id}:{uuid.uuid4().hex[:12]}",
     )
-    try:
-        db.add(new_job)
-        plan.status = PlanStatus.EXECUTING.value
-        db.commit()
-        db.refresh(new_job)
-        from app.tasks.compact_job import run_compaction_job
-
-        async_result = run_compaction_job.delay(new_job.id)
-        new_job.celery_task_id = async_result.id
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        release_table_lock(table.id)
-        raise AppError("LAKE-5000", message="重试任务投递失败", status_code=503) from exc
+    db.add(new_job)
+    plan.status = PlanStatus.EXECUTING.value
+    db.commit()
+    db.refresh(new_job)
+    log_event("JOB_REQUEUED", job_id=new_job.id, retry_of=job.id, plan_id=plan.id)
+    _try_schedule(db, schedule_service, table.id)
+    db.refresh(new_job)
     return job_service.serialize_job(db, new_job)
+
+
+def _try_schedule(db: Session, schedule_service, table_id: int) -> None:
+    """Best-effort admission: the job stays queued and a later trigger
+    (another execute, a job finish) will schedule it if this pass fails."""
+    try:
+        schedule_service.schedule_table(db, table_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        db.rollback()
+        log_event("JOB_SCHEDULE_FAILED", table_id=table_id, reason=f"{type(exc).__name__}: {exc}")

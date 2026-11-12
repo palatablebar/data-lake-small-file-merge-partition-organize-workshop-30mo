@@ -38,7 +38,20 @@ def create_snapshot(
     created_by: int | None = None,
     note: str | None = None,
     job_id: int | None = None,
+    commit: bool = True,
 ) -> TableSnapshot:
+    """Append the next manifest version for ``table``.
+
+    Version allocation is serialized per table: standalone callers take a row
+    lock on ``lake_tables`` here; the compaction worker passes ``commit=False``
+    because it already holds that lock inside its atomic publish transaction
+    (file rewrites + snapshot row + job status commit together).
+    """
+    if commit:
+        query = db.query(LakeTable).filter(LakeTable.id == table.id)
+        if db.get_bind().dialect.name != "sqlite":
+            query = query.with_for_update()
+        query.first()
     manifest = manifest_for_table(db, table)
     previous = latest_snapshot(db, table.id)
     verification = (
@@ -75,8 +88,11 @@ def create_snapshot(
         created_by=created_by,
     )
     db.add(snapshot)
-    db.commit()
-    db.refresh(snapshot)
+    if commit:
+        db.commit()
+        db.refresh(snapshot)
+    else:
+        db.flush()
     return snapshot
 
 

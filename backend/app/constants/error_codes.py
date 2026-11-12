@@ -24,6 +24,10 @@ class ErrorCode(str, Enum):
     # auth layer
     FORBIDDEN = "LAKE-2015"
     UNAUTHORIZED = "LAKE-2016"
+    # partition scheduling / staged publish
+    PARTITION_CONFLICT = "LAKE-2019"
+    PARTITION_ROW_MISMATCH = "LAKE-2020"
+    JOB_DUPLICATE_DELIVERY = "LAKE-2021"
 
 
 ERROR_MESSAGES = {
@@ -43,6 +47,9 @@ ERROR_MESSAGES = {
     ErrorCode.TABLE_PAUSED: "湖表已暂停，不能生成或执行计划",
     ErrorCode.FORBIDDEN: "当前角色无权执行该操作",
     ErrorCode.UNAUTHORIZED: "未登录或登录已过期",
+    ErrorCode.PARTITION_CONFLICT: "分区与正在执行的任务重叠或相邻，已进入等待队列",
+    ErrorCode.PARTITION_ROW_MISMATCH: "分区重写后行数校验不通过，已中止发布",
+    ErrorCode.JOB_DUPLICATE_DELIVERY: "重复投递已被忽略，任务只生效一次",
 }
 
 ERROR_STATUS = {
@@ -62,6 +69,9 @@ ERROR_STATUS = {
     ErrorCode.TABLE_PAUSED: 409,
     ErrorCode.FORBIDDEN: 403,
     ErrorCode.UNAUTHORIZED: 401,
+    ErrorCode.PARTITION_CONFLICT: 409,
+    ErrorCode.PARTITION_ROW_MISMATCH: 409,
+    ErrorCode.JOB_DUPLICATE_DELIVERY: 200,
 }
 
 

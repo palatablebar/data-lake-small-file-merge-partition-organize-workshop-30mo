@@ -1,9 +1,12 @@
-"""Rate limiting, daily plan quota and the per-table execution lock.
+"""Rate limiting and daily plan quota.
 
 * sliding window: Redis zset ``rl:lakepack:{user_id}`` (RATE_WINDOW_SECONDS)
 * daily quota: users.daily_plan_quota / plan_used / plan_used_date
-* table lock: SETNX ``joblock:{table_id}`` so two rewrite jobs never touch the
-  same table concurrently (the "重复跑覆盖正在写入的分区" pain point).
+
+Concurrency control is partition-scoped now (see
+``app/services/schedule_service.py`` — partition leases + adjacency rules);
+the old table-wide ``acquire_table_lock`` helpers below are kept only for
+backwards compatibility and are no longer called.
 """
 import time
 from datetime import date

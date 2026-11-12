@@ -12,9 +12,18 @@
         <div class="meter__fill" :class="job.status === 'failed' ? 'meter__fill--hot' : ''" :style="{ width: `${job.progress}%` }"></div>
       </div>
       <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] uppercase tracking-label text-[var(--ink-soft)]">
-        <span :class="job.processed_groups > 0 ? 'text-[var(--ink)]' : ''">01 重写 {{ job.processed_groups }}/{{ job.groups_total }} 组</span>
-        <span :class="job.progress >= 95 ? 'text-[var(--ink)]' : ''">02 快照</span>
+        <span :class="job.processed_groups > 0 ? 'text-[var(--ink)]' : ''">01 分区重写 {{ job.processed_groups }}/{{ job.groups_total }} 组</span>
+        <span :class="job.progress >= 95 ? 'text-[var(--ink)]' : ''">02 统一发布快照</span>
         <span :class="job.progress >= 100 ? 'text-[var(--ink)]' : ''">03 守恒校验</span>
+      </div>
+
+      <div
+        v-if="job.status === 'queued' && job.admission_state === 'waiting'"
+        class="mt-3 border-l-2 border-[var(--ochre)] bg-[color-mix(in_oklch,var(--ochre)_10%,transparent)] px-3 py-2 text-[11.5px]"
+        data-test="job-waiting-reason"
+      >
+        <span class="label text-[oklch(46%_0.11_70)]">等待队列 · 第 {{ job.queue_position ?? '—' }} 位</span>
+        <div class="mt-1">{{ job.waiting_reason ?? '等待分区租约释放' }}</div>
       </div>
 
       <dl class="mt-4 grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3">
@@ -40,6 +49,7 @@
 
       <div class="mt-4 flex flex-wrap items-center gap-x-5 gap-y-1 tick-top pt-3 text-[10.5px] text-[var(--ink-soft)]">
         <span>触发：{{ job.triggered_by_name ?? '—' }}</span>
+        <span>准入：{{ job.admission_state === 'admitted' ? '已获分区租约' : '等待分区' }}</span>
         <span>开始：{{ formatTime(job.started_at) }}</span>
         <span>结束：{{ formatTime(job.finished_at) }}</span>
         <span>Celery：{{ job.celery_task_id ? job.celery_task_id.slice(0, 8) : '—' }}</span>
@@ -62,7 +72,7 @@ const stats = computed(() => [
   { label: '产出文件', value: formatCount(props.job.produced_files) },
   { label: '写入字节', value: formatBytes(props.job.bytes_written) },
   { label: '处理分组', value: `${props.job.processed_groups} / ${props.job.groups_total}` },
-  { label: '快照 ID', value: props.job.snapshot_id ? `#${props.job.snapshot_id}` : '—' },
+  { label: '快照版本', value: props.job.snapshot_version ? `v${props.job.snapshot_version}` : '—' },
   { label: '预计耗时', value: props.job.est_duration_seconds ? `${props.job.est_duration_seconds.toFixed(1)}s` : '—' },
 ])
 </script>

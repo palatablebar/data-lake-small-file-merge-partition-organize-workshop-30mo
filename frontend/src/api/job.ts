@@ -1,8 +1,7 @@
 import http from './http'
-import type { CompactJob } from '../types/job'
-import type { ListResponse } from '../types/api'
+import type { CompactJob, JobListResponse } from '../types/job'
 
-export async function fetchJobs(tableId?: number): Promise<ListResponse<CompactJob>> {
+export async function fetchJobs(tableId?: number): Promise<JobListResponse> {
   const { data } = await http.get('/jobs', { params: tableId ? { table_id: tableId } : {} })
   return data
 }

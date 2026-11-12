@@ -148,8 +148,8 @@
                 <div class="bp-frame__head"><span class="label">提交执行</span></div>
                 <div class="bp-frame__body">
                   <p class="text-[11.5px] leading-relaxed text-[var(--ink-soft)]">
-                    提交后由 Celery worker 执行重写：逐组替换 manifest、回报进度，完成后自动生成
-                    快照并做行数守恒校验。同一湖表只允许一个任务在跑。
+                    提交后按分区租约调度：互不重叠且不相邻的分区可并发执行，重叠/相邻分区进入等待队列；
+                    每个分区先独立重写并校验行数，全部通过后统一发布一个快照版本，重复投递只生效一次。
                   </p>
                   <button
                     class="bp-btn bp-btn--solid mt-3 w-full justify-center !py-2"
